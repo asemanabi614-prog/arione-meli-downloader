@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>دانلودر حرفه‌ای گیت‌هاب | GitHub Downloader</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', 'Tahoma', 'システム', system-ui, -apple-system, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        /* Microsoft Fluent Design */
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.1);
+            overflow: hidden;
+            animation: slideUp 0.5s ease-out;
+        }
+        
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        /* هدر با سبک Fluent */
+        .header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+            animation: pulse 4s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+            position: relative;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        /* فرم و ورودی‌ها */
+        .form-group {
+            margin-bottom: 30px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 12px;
+            font-weight: 600;
+            color: #1a1a2e;
+            font-size: 0.95em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        textarea, select, input {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            font-size: 14px;
+            font-family: 'Segoe UI', monospace;
+            transition: all 0.3s ease;
+            background: white;
+            resize: vertical;
+        }
+        
+        textarea:focus, select:focus, input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        textarea {
+            min-height: 150px;
+            font-family: 'Courier New', monospace;
+        }
+        
+        /* دکمه‌ها */
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+        }
+        
+        .btn {
+            flex: 1;
+            padding: 14px 28px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            font-family: inherit;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+        }
+        
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+            border: 1px solid #ddd;
+        }
+        
+        .btn-secondary:hover {
+            background: #e0e0e0;
+            transform: translateY(-1px);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+        
+        /* وضعیت و پیشرفت */
+        .status {
+            margin-top: 30px;
+            padding: 20px;
+            border-radius: 16px;
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            display: none;
+        }
+        
+        .status.show {
+            display: block;
+            animation: fadeIn 0.5s ease-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .status-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 15px;
+        }
+        
+        .status-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+        }
+        
+        .status-icon.success {
+            background: #10b981;
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+        }
+        
+        .status-icon.error {
+            background: #ef4444;
+            box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+        }
+        
+        .status-icon.loading {
+            background: #f59e0b;
+            animation: pulse 1s ease-in-out infinite;
+        }
+        
+        .status-message {
+            color: #1a1a2e;
+            font-weight: 500;
+        }
+        
+        .progress-bar {
+            margin-top: 15px;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.3s ease;
+            border-radius: 10px;
+        }
+        
+        /* Info boxes */
+        .info-box {
+            background: #e7f3ff;
+            border-right: 4px solid #2196f3;
+            padding: 15px;
+            border-radius: 12px;
+            margin-top: 20px;
+        }
+        
+        .info-box h4 {
+            color: #1976d2;
+            margin-bottom: 10px;
+        }
+        
+        .info-box ul {
+            margin-right: 20px;
+            color: #555;
+        }
+        
+        .info-box li {
+            margin: 8px 0;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container {
+                margin: 10px;
+            }
+            
+            .content {
+                padding: 25px;
+            }
+            
+            .header h1 {
+                font-size: 1.8em;
+            }
+            
+            .button-group {
+                flex-direction: column;
+            }
+            
+            .btn {
+                padding: 12px;
+            }
+        }
+        
+        /* اسکرول بار سفارشی */
+        ::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <span>📥</span>
+                دانلودر حرفه‌ای گیت‌هاب
+                <span>🚀</span>
+            </h1>
+            <p>ابزار قدرتمند دانلود و ذخیره‌سازی مستقیم در مخزن گیت‌هاب | طراحی شده با Fluent Design</p>
+        </div>
+        
+        <div class="content">
+            <form id="downloadForm">
+                <div class="form-group">
+                    <label>🔗 لینک‌های مستقیم فایل‌ها</label>
+                    <textarea 
+                        id="urls" 
+                        placeholder="https://example.com/file1.zip&#10;https://example.com/file2.mp4&#10;https://example.com/file3.pdf"
+                        required
+                    ></textarea>
+                    <small style="color: #666; display: block; margin-top: 8px;">
+                        💡 می‌توانید چندین لینک را در هر خط وارد کنید (با فاصله یا خط جدید)
+                    </small>
+                </div>
+                
+                <div class="form-group">
+                    <label>⚙️ تنظیمات پیشرفته</label>
+                    <select id="mode">
+                        <option value="auto">🤖 خودکار (تقسیم فایل‌های بالای 90MB)</option>
+                        <option value="zip-single">📦 یک فایل ZIP نهایی (تقسیم خودکار)</option>
+                        <option value="keep-original">💾 حفظ ساختار اصلی (بدون تقسیم)</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>🏷️ اطلاعات گیت‌هاب</label>
+                    <input 
+                        type="text" 
+                        id="repo" 
+                        placeholder="username/repository-name"
+                        value=""
+                    >
+                    <small style="color: #666; display: block; margin-top: 8px;">
+                        ⚠️ مخزن باید از قبل ایجاد شده باشد و اکشن‌ها در آن فعال باشد
+                    </small>
+                </div>
+                
+                <div class="button-group">
+                    <button type="submit" class="btn btn-primary" id="submitBtn">
+                        🚀 شروع دانلود
+                    </button>
+                    <button type="button" class="btn btn-secondary" id="clearBtn">
+                        🗑️ پاک کردن فرم
+                    </button>
+                </div>
+            </form>
+            
+            <div id="status" class="status">
+                <div class="status-header">
+                    <div class="status-icon" id="statusIcon"></div>
+                    <div class="status-message" id="statusMessage"></div>
+                </div>
+                <div class="progress-bar" id="progressBar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <div id="statusDetails" style="margin-top: 10px; font-size: 0.9em; color: #666;"></div>
+            </div>
+            
+            <div class="info-box">
+                <h4>ℹ️ راهنمای استفاده</h4>
+                <ul>
+                    <li><strong>مرحله 1:</strong> لینک‌های مستقیم فایل‌های خود را وارد کنید</li>
+                    <li><strong>مرحله 2:</strong> نام مخزن گیت‌هاب خود را وارد کنید (مثال: username/repo)</li>
+                    <li><strong>مرحله 3:</strong> روی "شروع دانلود" کلیک کنید</li>
+                    <li><strong>مرحله 4:</strong> منتظر بمانید تا عملیات کامل شود</li>
+                    <li><strong>مرحله 5:</strong> فایل نهایی را از بخش Actions گیت‌هاب دانلود کنید</li>
+                </ul>
+                <br>
+                <h4>📦 ویژگی‌های خاص</h4>
+                <ul>
+                    <li>✅ دانلود همزمان چندین فایل با <strong>aria2</strong></li>
+                    <li>✅ تقسیم خودکار فایل‌های بزرگ به قطعات <strong>90 مگابایتی</strong></li>
+                    <li>✅ ایجاد آرشیو <strong>ZIP نهایی</strong> از همه فایل‌ها</li>
+                    <li>✅ رابط کاربری <strong>Microsoft Fluent</strong> زیبا و روان</li>
+                    <li>✅ گزارش پیشرفت و وضعیت به‌روز</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class GitHubDownloader {
+            constructor() {
+                this.apiBase = 'https://api.github.com';
+                this.initEventListeners();
+            }
+            
+            initEventListeners() {
+                document.getElementById('downloadForm').addEventListener('submit', (e) => {
+                    e.preventDefault();
+                    this.startDownload();
+                });
+                
+                document.getElementById('clearBtn').addEventListener('click', () => {
+                    document.getElementById('urls').value = '';
+                    document.getElementById('repo').value = '';
+                    document.getElementById('mode').value = 'auto';
+                });
+            }
+            
+            updateStatus(type, message, details = '', progress = 0) {
+                const statusDiv = document.getElementById('status');
+                const icon = document.getElementById('statusIcon');
+                const msgDiv = document.getElementById('statusMessage');
+                const detailsDiv = document.getElementById('statusDetails');
+                const progressFill = document.getElementById('progressFill');
+                
+                statusDiv.classList.add('show');
+                
+                // تنظیم آیکون
+                icon.className = 'status-icon';
+                if (type === 'loading') icon.classList.add('loading');
+                else if (type === 'success') icon.classList.add('success');
+                else if (type === 'error') icon.classList.add('error');
+                
+                msgDiv.textContent = message;
+                detailsDiv.textContent = details;
+                progressFill.style.width = `${progress}%`;
+                
+                if (type === 'success') {
+                    setTimeout(() => {
+                        statusDiv.classList.remove('show');
+                    }, 5000);
+                }
+            }
+            
+            async dispatchWorkflow(repo, urls, mode) {
+                const [owner, repoName] = repo.split('/');
+                const url = `${this.apiBase}/repos/${owner}/${repoName}/dispatches`;
+                
+                const payload = {
+                    event_type: 'download-request',
+                    client_payload: {
+                        urls: urls.join(' '),
+                        mode: mode
+                    }
+                };
+                
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `token ${this.getToken()}`,
+                        'Accept': 'application/vnd.github.v3+json',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`خطا در ارسال درخواست: ${response.status}`);
+                }
+                
+                return true;
+            }
+            
+            getToken() {
+                // توکن گیت‌هاب - می‌توانید در localStorage ذخیره کنید
+                let token = localStorage.getItem('github_token');
+                if (!token) {
+                    token = prompt('لطفاً توکن دسترسی گیت‌هاب خود را وارد کنید:\n(از Settings > Developer settings > Personal access tokens بسازید)');
+                    if (token) {
+                        localStorage.setItem('github_token', token);
+                    }
+                }
+                return token;
+            }
+            
+            async startDownload() {
+                const urlsText = document.getElementById('urls').value;
+                const repo = document.getElementById('repo').value;
+                const mode = document.getElementById('mode').value;
+                
+                // اعتبارسنجی
+                if (!urlsText.trim()) {
+                    this.updateStatus('error', '❌ خطا', 'لطفاً حداقل یک لینک وارد کنید');
+                    return;
+                }
+                
+                if (!repo.trim()) {
+                    this.updateStatus('error', '❌ خطا', 'لطفاً نام مخزن گیت‌هاب را وارد کنید');
+                    return;
+                }
+                
+                // پردازش لینک‌ها
+                const urls = urlsText.split(/\s+/).filter(url => url.trim() && url.startsWith('http'));
+                
+                if (urls.length === 0) {
+                    this.updateStatus('error', '❌ خطا', 'لطفاً لینک‌های معتبر وارد کنید (باید با http:// یا https:// شروع شوند)');
+                    return;
+                }
+                
+                this.updateStatus('loading', '🔄 در حال ارسال درخواست...', `تعداد فایل‌ها: ${urls.length}`, 25);
+                
+                try {
+                    // ارسال درخواست به گیت‌هاب
+                    await this.dispatchWorkflow(repo, urls, mode);
+                    
+                    this.updateStatus('success', '✅ درخواست با موفقیت ارسال شد!', 
+                        `لینک‌های ${urls.length} فایل برای دانلود ثبت شد.\n\n` +
+                        `🔍 برای مشاهده پیشرفت:\n` +
+                        `1. به مخزن ${repo} در گیت‌هاب بروید\n` +
+                        `2. روی تب Actions کلیک کنید\n` +
+                        `3. آخرین workflow در حال اجرا را مشاهده کنید\n` +
+                        `4. پس از اتمام، فایل نهایی را از بخش Artifacts دانلود کنید`,
+                        100);
+                    
+                    // باز کردن لینک گیت‌هاب در تب جدید
+                    setTimeout(() => {
+                        window.open(`https://github.com/${repo}/actions`, '_blank');
+                    }, 2000);
+                    
+                } catch (error) {
+                    this.updateStatus('error', '❌ خطا در ارسال درخواست', error.message, 0);
+                    console.error('Error:', error);
+                }
+            }
+        }
+        
+        // راه‌اندازی برنامه
+        const downloader = new GitHubDownloader();
+        
+        // بررسی وجود توکن در localStorage
+        if (!localStorage.getItem('github_token')) {
+            setTimeout(() => {
+                if (confirm('برای استفاده از این ابزار نیاز به توکن گیت‌هاب دارید.\nآیا می‌خواهید راهنمای ساخت توکن را ببینید؟')) {
+                    window.open('https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens', '_blank');
+                }
+            }, 1000);
+        }
+    </script>
+</body>
+</html>
