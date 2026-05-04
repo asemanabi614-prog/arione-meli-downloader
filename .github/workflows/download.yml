@@ -1,210 +1,288 @@
-name: Download File
+name: Auto Download
 
 on:
   workflow_dispatch:
     inputs:
       file_url:
-        description: 'لینک مستقیم فایل'
+        description: "Direct file URL"
         required: true
         type: string
-      file_name:
-        description: 'نام فایل خروجی (اختیاری)'
+      output_name:
+        description: "Optional output file name"
         required: false
         type: string
-        default: ''
       split_enabled:
-        description: 'تقسیم فایل‌های بزرگ (true/false)'
-        required: false
-        type: string
-        default: 'true'
+        description: "Enable split for files larger than 100MB"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: auto-download-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  download-and-push:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+
+    env:
+      DOWNLOAD_DIR: download-temp
+      MAX_DIRECT_BYTES: 104857600
+      PART_SIZE: 90M
+      INPUT_URL: ${{ inputs.file_url }}
+      INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
+      SPLIT_ENABLED: ${{ inputs.split_enabled }}
 
     steps:
-      - name: 📥 Checkout مخزن
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+          persist-credentials: true
 
-      - name: 🧹 پاکسازی فایل‌های قدیمی (بیش از 2 روز)
+      - name: Install aria2 and zip
         run: |
-          echo "=== پاکسازی فایل‌های قدیمی‌تر از 2 روز ==="
-          if [ -d "download-temp" ]; then
-            # Find files older than 2 days
-            OLD_FILES=$(find download-temp -type f -mtime +2 2>/dev/null || true)
-            if [ -n "$OLD_FILES" ]; then
-              echo "فایل‌های قدیمی پیدا شد:"
-              echo "$OLD_FILES"
-              find download-temp -type f -mtime +2 -delete 2>/dev/null || true
-              # Remove empty directories
-              find download-temp -type d -empty -delete 2>/dev/null || true
-              echo "فایل‌های قدیمی حذف شدند."
-            else
-              echo "فایل قدیمی‌ای یافت نشد."
-            fi
-          else
-            echo "پوشه download-temp وجود ندارد. ایجاد می‌شود."
-          fi
-          mkdir -p download-temp
+          sudo apt-get update
+          sudo apt-get install -y aria2 zip
 
-      - name: 🔧 نصب aria2
+      - name: Prepare download directory and cleanup old files
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 zip
+          mkdir -p "$DOWNLOAD_DIR"
+          find "$DOWNLOAD_DIR" -type f -mtime +2 -delete
 
-      - name: 📥 دانلود فایل
+      - name: Resolve filename
+        id: meta
+        shell: bash
         run: |
-          FILE_URL="${{ github.event.inputs.file_url }}"
-          CUSTOM_NAME="${{ github.event.inputs.file_name }}"
+          set -euo pipefail
 
-          echo "=== شروع دانلود ==="
-          echo "لینک: $FILE_URL"
+          RAW_NAME="${INPUT_OUTPUT_NAME:-}"
 
-          # Determine output filename
-          if [ -n "$CUSTOM_NAME" ]; then
-            OUTPUT_NAME="$CUSTOM_NAME"
-          else
-            # Extract filename from URL
-            OUTPUT_NAME=$(basename "$FILE_URL" | sed 's/\?.*//' | sed 's/#.*//')
-            # If empty or just /, use default
-            if [ -z "$OUTPUT_NAME" ] || [ "$OUTPUT_NAME" = "/" ]; then
-              OUTPUT_NAME="downloaded_file"
-            fi
+          if [ -z "$RAW_NAME" ]; then
+            URL_PATH="${INPUT_URL%%\?*}"
+            RAW_NAME="$(basename "$URL_PATH")"
           fi
 
-          echo "نام فایل خروجی: $OUTPUT_NAME"
-          echo "OUTPUT_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+          if [ -z "$RAW_NAME" ] || [ "$RAW_NAME" = "/" ] || [ "$RAW_NAME" = "." ]; then
+            RAW_NAME="downloaded-file"
+          fi
 
-          # Download with aria2c
+          SAFE_NAME="$(echo "$RAW_NAME" | tr -cd '[:alnum:]._-' | sed 's/^[.]*//')"
+
+          if [ -z "$SAFE_NAME" ]; then
+            SAFE_NAME="downloaded-file"
+          fi
+
+          TS="$(date +%Y%m%d-%H%M%S)"
+          BASE="${SAFE_NAME%.*}"
+          EXT="${SAFE_NAME##*.}"
+
+          if [ "$BASE" = "$EXT" ]; then
+            FINAL_NAME="${BASE}-${TS}"
+          else
+            FINAL_NAME="${BASE}-${TS}.${EXT}"
+          fi
+
+          echo "safe_name=$FINAL_NAME" >> "$GITHUB_OUTPUT"
+          echo "base_name=${FINAL_NAME%.*}" >> "$GITHUB_OUTPUT"
+
+      - name: Download file with aria2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work
+
           aria2c \
+            --continue=true \
             --max-connection-per-server=16 \
             --split=16 \
             --min-split-size=1M \
-            --max-tries=5 \
-            --retry-wait=3 \
-            --continue=true \
-            --auto-file-renaming=false \
             --allow-overwrite=true \
-            --console-log-level=notice \
-            --summary-interval=10 \
-            --dir="./download-temp" \
-            --out="$OUTPUT_NAME" \
-            "$FILE_URL"
+            --auto-file-renaming=false \
+            --dir=work \
+            --out="${{ steps.meta.outputs.safe_name }}" \
+            "$INPUT_URL"
 
-          # Verify download
-          if [ ! -f "download-temp/$OUTPUT_NAME" ]; then
-            echo "❌ خطا: فایل دانلود نشد!"
+      - name: Process downloaded file
+        id: process
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="work/${{ steps.meta.outputs.safe_name }}"
+          FINAL_NAME="${{ steps.meta.outputs.safe_name }}"
+          BASE_NAME="${{ steps.meta.outputs.base_name }}"
+
+          if [ ! -f "$FILE" ]; then
+            echo "Downloaded file not found"
             exit 1
           fi
 
-          FILE_SIZE=$(stat -c%s "download-temp/$OUTPUT_NAME")
-          echo "✅ دانلود کامل شد. حجم: $FILE_SIZE بایت"
-          echo "FILE_SIZE=$FILE_SIZE" >> $GITHUB_ENV
+          SIZE="$(stat -c%s "$FILE")"
 
-      - name: ✂️ تقسیم و فشرده‌سازی فایل (در صورت نیاز)
-        run: |
-          SPLIT_ENABLED="${{ github.event.inputs.split_enabled }}"
-          FILE_PATH="download-temp/${{ env.OUTPUT_NAME }}"
-          FILE_SIZE=${{ env.FILE_SIZE }}
-          THRESHOLD=$((90 * 1024 * 1024))  # 90MB
+          echo "Downloaded size: $SIZE bytes"
 
-          echo "=== بررسی نیاز به تقسیم ==="
-          echo "حجم فایل: $FILE_SIZE بایت"
-          echo "آستانه: $THRESHOLD بایت"
-          echo "تقسیم فعال: $SPLIT_ENABLED"
-
-          if [ "$SPLIT_ENABLED" = "true" ] && [ "$FILE_SIZE" -gt "$THRESHOLD" ]; then
-            echo "فایل بزرگتر از 90MB است. شروع تقسیم..."
-
-            ORIGINAL_NAME="${{ env.OUTPUT_NAME }}"
-            SPLIT_DIR="download-temp/split_temp"
-            mkdir -p "$SPLIT_DIR"
-
-            # Split file into 90MB chunks
-            split -b 90M -d --additional-suffix=.part "$FILE_PATH" "$SPLIT_DIR/${ORIGINAL_NAME}."
-
-            echo "قطعات ایجاد شده:"
-            ls -lh "$SPLIT_DIR/"
-
-            # Create ZIP containing all parts
-            ZIP_NAME="${ORIGINAL_NAME}.split.zip"
-            cd "$SPLIT_DIR"
-            zip -0 "../$ZIP_NAME" *
-            cd ../..
-
-            echo "فایل ZIP ایجاد شد: $ZIP_NAME"
-            ls -lh "download-temp/$ZIP_NAME"
-
-            # Remove original file and split temp
-            rm -f "$FILE_PATH"
-            rm -rf "$SPLIT_DIR"
-
-            echo "FINAL_FILE=$ZIP_NAME" >> $GITHUB_ENV
-            echo "WAS_SPLIT=true" >> $GITHUB_ENV
+          if [ "$SIZE" -le "$MAX_DIRECT_BYTES" ]; then
+            mv "$FILE" "$DOWNLOAD_DIR/$FINAL_NAME"
+            echo "mode=direct" >> "$GITHUB_OUTPUT"
+            echo "final_file=$FINAL_NAME" >> "$GITHUB_OUTPUT"
+            echo "final_kind=file" >> "$GITHUB_OUTPUT"
           else
-            echo "نیازی به تقسیم نیست."
-            echo "FINAL_FILE=${{ env.OUTPUT_NAME }}" >> $GITHUB_ENV
-            echo "WAS_SPLIT=false" >> $GITHUB_ENV
+            if [ "$SPLIT_ENABLED" != "true" ]; then
+              echo "File is larger than 100MB and split is disabled."
+              exit 1
+            fi
+
+            PART_PREFIX="$DOWNLOAD_DIR/${FINAL_NAME}.part-"
+
+            split -b "$PART_SIZE" -d --additional-suffix=.part "$FILE" "$PART_PREFIX"
+
+            rm -f "$FILE"
+
+            PART_COUNT="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name "${FINAL_NAME}.part-*.part" | wc -l | tr -d ' ')"
+
+            cat > "$DOWNLOAD_DIR/${FINAL_NAME}.manifest.json" <<EOF
+          {
+            "name": "$FINAL_NAME",
+            "type": "split",
+            "partSize": "$PART_SIZE",
+            "partCount": $PART_COUNT,
+            "originalSize": $SIZE,
+            "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "rebuild": "cat ${FINAL_NAME}.part-*.part > ${FINAL_NAME}"
+          }
+          EOF
+
+            echo "mode=split" >> "$GITHUB_OUTPUT"
+            echo "final_file=${FINAL_NAME}.manifest.json" >> "$GITHUB_OUTPUT"
+            echo "final_kind=manifest" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 📊 نمایش اطلاعات فایل نهایی
+      - name: Commit direct/small files and cleanup changes
+        if: steps.process.outputs.mode == 'direct'
+        shell: bash
         run: |
-          echo "=== فایل‌های موجود در download-temp ==="
-          ls -lhR download-temp/
-          echo ""
-          echo "فایل نهایی: ${{ env.FINAL_FILE }}"
-          echo "تقسیم شده: ${{ env.WAS_SPLIT }}"
+          set -euo pipefail
 
-      - name: 📤 آپلود به مخزن (Commit & Push)
-        run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Add all files in download-temp
-          git add download-temp/ -f
+          git add "$DOWNLOAD_DIR/"
 
-          # Check if there are changes
-          if git diff --staged --quiet; then
-            echo "تغییری برای commit وجود ندارد."
-          else
-            TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-            git commit -m "📥 دانلود فایل: ${{ env.FINAL_FILE }} - $TIMESTAMP"
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
 
-            # Push with retry
+          git commit -m "Download: ${{ steps.process.outputs.final_file }}"
+
+          for i in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            sleep $((i * 3))
+          done
+
+          echo "Push failed after 3 retries."
+          exit 1
+
+      - name: Commit split files in safe batches
+        if: steps.process.outputs.mode == 'split'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          FINAL_NAME="${{ steps.meta.outputs.safe_name }}"
+
+          git add "$DOWNLOAD_DIR/${FINAL_NAME}.manifest.json"
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Download manifest: $FINAL_NAME"
+
             for i in 1 2 3; do
-              echo "تلاش $i برای push..."
-              if git push origin main; then
-                echo "✅ Push موفق بود!"
+              if git push; then
                 break
-              else
-                echo "⚠️ Push ناموفق. تلاش مجدد..."
-                git pull --rebase origin main
-                sleep 5
+              fi
+
+              git pull --rebase origin "${GITHUB_REF_NAME}"
+              sleep $((i * 3))
+
+              if [ "$i" = "3" ]; then
+                echo "Push failed after 3 retries."
+                exit 1
               fi
             done
           fi
 
-      - name: 🔗 نمایش لینک دانلود
-        run: |
-          REPO="${{ github.repository }}"
-          FILE="${{ env.FINAL_FILE }}"
+          mapfile -t PARTS < <(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name "${FINAL_NAME}.part-*.part" | sort)
 
-          echo "============================================"
-          echo "✅ عملیات با موفقیت انجام شد!"
-          echo "============================================"
+          BATCH=0
+
+          for PART in "${PARTS[@]}"; do
+            SIZE="$(stat -c%s "$PART")"
+
+            if [ "$SIZE" -gt "$MAX_DIRECT_BYTES" ]; then
+              echo "Part is larger than 100MB: $PART"
+              exit 1
+            fi
+
+            BATCH=$((BATCH + 1))
+
+            git add "$PART"
+            git commit -m "Download part $BATCH: $FINAL_NAME"
+
+            for i in 1 2 3; do
+              if git push; then
+                break
+              fi
+
+              git pull --rebase origin "${GITHUB_REF_NAME}"
+              sleep $((i * 3))
+
+              if [ "$i" = "3" ]; then
+                echo "Push failed after 3 retries."
+                exit 1
+              fi
+            done
+          done
+
+      - name: Print final raw URL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REPO="${GITHUB_REPOSITORY}"
+          BRANCH="${GITHUB_REF_NAME}"
+
           echo ""
-          echo "📥 لینک دانلود مستقیم (Raw):"
-          echo "https://raw.githubusercontent.com/${REPO}/main/download-temp/${FILE}"
+          echo "Download folder:"
+          echo "https://github.com/${REPO}/tree/${BRANCH}/download-temp"
           echo ""
-          echo "📥 لینک CodeLoad:"
-          echo "https://codeload.github.com/${REPO}/raw/main/download-temp/${FILE}"
-          echo ""
-          echo "📁 پوشه دانلودها:"
-          echo "https://github.com/${REPO}/tree/main/download-temp"
-          echo "============================================"
+
+          if [ "${{ steps.process.outputs.mode }}" = "direct" ]; then
+            echo "Final raw URL:"
+            echo "https://raw.githubusercontent.com/${REPO}/${BRANCH}/download-temp/${{ steps.process.outputs.final_file }}"
+          else
+            echo "File was split because it is larger than 100MB."
+            echo "Manifest raw URL:"
+            echo "https://raw.githubusercontent.com/${REPO}/${BRANCH}/download-temp/${{ steps.process.outputs.final_file }}"
+            echo ""
+            echo "Parts:"
+            find "$DOWNLOAD_DIR" -maxdepth 1 -type f -name "${{ steps.meta.outputs.safe_name }}.part-*.part" | sort | while read -r f; do
+              b="$(basename "$f")"
+              echo "https://raw.githubusercontent.com/${REPO}/${BRANCH}/download-temp/${b}"
+            done
+          fi
