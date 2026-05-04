@@ -1,4 +1,4 @@
-name: Auto Download
+name: Auto Downloader
 
 on:
   workflow_dispatch:
@@ -8,11 +8,11 @@ on:
         required: true
         type: string
       output_name:
-        description: "Optional output file name"
+        description: "Optional output filename"
         required: false
         type: string
-      split_enabled:
-        description: "Enable split ZIP for files larger than 100MB"
+      enable_split:
+        description: "Enable split for files > 100MB"
         required: true
         default: "true"
         type: choice
@@ -25,312 +25,372 @@ permissions:
   actions: read
 
 concurrency:
-  group: auto-download-${{ github.ref }}
+  group: auto-downloader-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   download:
+    name: Download / Process / Publish
     runs-on: ubuntu-latest
 
     env:
-      DOWNLOAD_DIR: download-temp
-      MAX_DIRECT_BYTES: 104857600
-      ZIP_PART_SIZE: 90m
-      INPUT_URL: ${{ inputs.file_url }}
-      INPUT_OUTPUT_NAME: ${{ inputs.output_name }}
-      SPLIT_ENABLED: ${{ inputs.split_enabled }}
+      TEMP_DIR: download-temp
+      MAX_GIT_FILE_SIZE: 100000000
+      SPLIT_SIZE: 90M
+      RELEASE_TAG: auto-downloads
+      RELEASE_NAME: Auto Downloads
 
     steps:
-      - name: Checkout repository
+      - name: 1) Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true
 
-      - name: Install aria2 and zip
+      - name: 2) Install aria2 and zip
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 zip
+          sudo apt-get install -y aria2 zip unzip jq
 
-      - name: Prepare download directory and cleanup old files
-        shell: bash
+      - name: 3) Prepare folders
         run: |
-          set -euo pipefail
-          mkdir -p "$DOWNLOAD_DIR"
-          find "$DOWNLOAD_DIR" -type f -mtime +2 -delete
-
-      - name: Resolve filename
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          RAW_NAME="${INPUT_OUTPUT_NAME:-}"
-
-          if [ -z "$RAW_NAME" ]; then
-            URL_PATH="${INPUT_URL%%\?*}"
-            RAW_NAME="$(basename "$URL_PATH")"
-          fi
-
-          if [ -z "$RAW_NAME" ] || [ "$RAW_NAME" = "/" ] || [ "$RAW_NAME" = "." ]; then
-            RAW_NAME="downloaded-file"
-          fi
-
-          SAFE_NAME="$(echo "$RAW_NAME" | tr -cd '[:alnum:]._-' | sed 's/^[.]*//')"
-
-          if [ -z "$SAFE_NAME" ]; then
-            SAFE_NAME="downloaded-file"
-          fi
-
-          TS="$(date +%Y%m%d-%H%M%S)"
-          BASE="${SAFE_NAME%.*}"
-          EXT="${SAFE_NAME##*.}"
-
-          if [ "$BASE" = "$EXT" ]; then
-            FINAL_NAME="${BASE}-${TS}"
-          else
-            FINAL_NAME="${BASE}-${TS}.${EXT}"
-          fi
-
-          ZIP_NAME="${FINAL_NAME}.zip"
-
-          echo "safe_name=$FINAL_NAME" >> "$GITHUB_OUTPUT"
-          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Download file with aria2
-        shell: bash
-        run: |
-          set -euo pipefail
-
+          mkdir -p "$TEMP_DIR"
           mkdir -p work
 
-          aria2c \
-            --continue=true \
-            --max-connection-per-server=16 \
-            --split=16 \
-            --min-split-size=1M \
-            --allow-overwrite=true \
-            --auto-file-renaming=false \
-            --dir=work \
-            --out="${{ steps.meta.outputs.safe_name }}" \
-            "$INPUT_URL"
+      - name: 4) Cleanup files older than 2 days
+        run: |
+          find "$TEMP_DIR" -type f -mtime +2 -delete || true
 
-      - name: Process downloaded file
-        id: process
+      - name: 5) Resolve input URL
+        id: input
         shell: bash
         run: |
           set -euo pipefail
 
-          FILE="work/${{ steps.meta.outputs.safe_name }}"
-          FINAL_NAME="${{ steps.meta.outputs.safe_name }}"
-          ZIP_NAME="${{ steps.meta.outputs.zip_name }}"
+          URL='${{ github.event.inputs.file_url }}'
+          OUT='${{ github.event.inputs.output_name }}'
 
-          if [ ! -f "$FILE" ]; then
-            echo "Downloaded file not found"
+          if [[ "$URL" =~ ^https://t\.me/ || "$URL" =~ ^tg:// ]]; then
+            echo "::warning::Telegram public/private links are not direct downloadable URLs. Provide a direct Telegram file URL or bot API file URL."
+          fi
+
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$OUT" ]; then
+            SAFE_NAME="$(basename "$OUT" | tr -cd '[:alnum:]._-' | sed 's/^$/download.bin/')"
+          else
+            SAFE_NAME=""
+          fi
+
+          echo "output_name=$SAFE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: 6) Download file with aria2
+        id: download
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL='${{ steps.input.outputs.url }}'
+          OUT='${{ steps.input.outputs.output_name }}'
+
+          cd work
+
+          if [ -n "$OUT" ]; then
+            aria2c \
+              --continue=true \
+              --max-connection-per-server=16 \
+              --split=16 \
+              --min-split-size=1M \
+              --allow-overwrite=true \
+              --auto-file-renaming=false \
+              --summary-interval=5 \
+              -o "$OUT" \
+              "$URL"
+          else
+            aria2c \
+              --continue=true \
+              --max-connection-per-server=16 \
+              --split=16 \
+              --min-split-size=1M \
+              --allow-overwrite=true \
+              --auto-file-renaming=false \
+              --summary-interval=5 \
+              "$URL"
+          fi
+
+          FILE="$(find . -maxdepth 1 -type f | head -n 1 | sed 's#^\./##')"
+
+          if [ -z "$FILE" ]; then
+            echo "::error::Downloaded file not found"
             exit 1
+          fi
+
+          SAFE_FILE="$(basename "$FILE" | tr -cd '[:alnum:]._-' | sed 's/^$/download.bin/')"
+
+          if [ "$FILE" != "$SAFE_FILE" ]; then
+            mv "$FILE" "$SAFE_FILE"
+            FILE="$SAFE_FILE"
           fi
 
           SIZE="$(stat -c%s "$FILE")"
-          echo "Downloaded size: $SIZE bytes"
 
-          if [ "$SIZE" -le "$MAX_DIRECT_BYTES" ]; then
-            mv "$FILE" "$DOWNLOAD_DIR/$FINAL_NAME"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
 
-            cat > "$DOWNLOAD_DIR/${FINAL_NAME}.info.json" <<EOF
-          {
-            "name": "$FINAL_NAME",
-            "type": "direct",
-            "size": $SIZE,
-            "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-            "download": "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/$DOWNLOAD_DIR/$FINAL_NAME"
-          }
-          EOF
+          echo "Downloaded: $FILE"
+          echo "Size: $SIZE bytes"
 
-            echo "mode=direct" >> "$GITHUB_OUTPUT"
-            echo "final_file=$FINAL_NAME" >> "$GITHUB_OUTPUT"
-            echo "zip_file=" >> "$GITHUB_OUTPUT"
-          else
-            if [ "$SPLIT_ENABLED" != "true" ]; then
-              echo "File is larger than 100MB and split ZIP is disabled."
-              exit 1
-            fi
-
-            mkdir -p zipwork
-            mv "$FILE" "zipwork/$FINAL_NAME"
-
-            cd zipwork
-
-            zip -0 -s "$ZIP_PART_SIZE" "../$DOWNLOAD_DIR/$ZIP_NAME" "$FINAL_NAME"
-
-            cd ..
-
-            rm -rf zipwork
-
-            ZIP_TOTAL_PARTS="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f $ -name "${ZIP_NAME}" -o -name "${ZIP_NAME%.*}.z[0-9][0-9]" -o -name "${ZIP_NAME}.z[0-9][0-9]" $ | wc -l | tr -d ' ')"
-
-            cat > "$DOWNLOAD_DIR/${ZIP_NAME}.manifest.json" <<EOF
-          {
-            "name": "$ZIP_NAME",
-            "originalName": "$FINAL_NAME",
-            "type": "split-zip",
-            "partSize": "$ZIP_PART_SIZE",
-            "partCount": $ZIP_TOTAL_PARTS,
-            "originalSize": $SIZE,
-            "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-            "usage": "Download all .z01/.z02/... parts and the .zip file into the same folder, then open the .zip file with WinRAR or 7-Zip.",
-            "mainZip": "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/$DOWNLOAD_DIR/$ZIP_NAME"
-          }
-          EOF
-
-            echo "mode=splitzip" >> "$GITHUB_OUTPUT"
-            echo "final_file=${ZIP_NAME}.manifest.json" >> "$GITHUB_OUTPUT"
-            echo "zip_file=$ZIP_NAME" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Validate no file exceeds GitHub 100MB limit
-        shell: bash
+      - name: 7) Configure git
         run: |
-          set -euo pipefail
-
-          TOO_BIG=0
-
-          while IFS= read -r -d '' f; do
-            SIZE="$(stat -c%s "$f")"
-            if [ "$SIZE" -gt "$MAX_DIRECT_BYTES" ]; then
-              echo "ERROR: File exceeds GitHub 100MB limit: $f ($SIZE bytes)"
-              TOO_BIG=1
-            fi
-          done < <(find "$DOWNLOAD_DIR" -type f -print0)
-
-          if [ "$TOO_BIG" = "1" ]; then
-            exit 1
-          fi
-
-      - name: Commit direct file
-        if: steps.process.outputs.mode == 'direct'
-        shell: bash
-        run: |
-          set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add "$DOWNLOAD_DIR/"
+      - name: 8) Process small file <= 100MB
+        if: ${{ steps.download.outputs.size <= 100000000 }}
+        id: small
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE='${{ steps.download.outputs.file }}'
+          FINAL="$FILE"
+
+          mkdir -p "$TEMP_DIR"
+          mv "work/$FILE" "$TEMP_DIR/$FINAL"
+
+          cat > "$TEMP_DIR/$FINAL.json" <<EOF
+          {
+            "type": "raw",
+            "file": "$FINAL",
+            "size": "${{ steps.download.outputs.size }}",
+            "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "raw_url": "https://raw.githubusercontent.com/${{ github.repository }}/main/$TEMP_DIR/$FINAL"
+          }
+          EOF
+
+          echo "final_file=$FINAL" >> "$GITHUB_OUTPUT"
+          echo "final_type=raw" >> "$GITHUB_OUTPUT"
+          echo "final_url=https://raw.githubusercontent.com/${{ github.repository }}/main/$TEMP_DIR/$FINAL" >> "$GITHUB_OUTPUT"
+
+      - name: 9) Commit small file with retry
+        if: ${{ steps.download.outputs.size <= 100000000 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add "$TEMP_DIR/"
 
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "Nothing to commit"
             exit 0
           fi
 
-          git commit -m "Download: ${{ steps.process.outputs.final_file }}"
+          git commit -m "Download: ${{ steps.small.outputs.final_file }}"
 
           for i in 1 2 3; do
             if git push; then
               exit 0
             fi
 
-            git pull --rebase origin "${GITHUB_REF_NAME}"
-            sleep $((i * 3))
+            echo "Push failed. Retry $i/3"
+            git pull --rebase origin main || true
+            sleep 5
           done
 
-          echo "Push failed after 3 retries."
+          echo "::error::Push failed after 3 retries"
           exit 1
 
-      - name: Commit split ZIP files in safe batches
-        if: steps.process.outputs.mode == 'splitzip'
+      - name: 10) Split large file into 90MB parts
+        if: ${{ steps.download.outputs.size > 100000000 && github.event.inputs.enable_split == 'true' }}
+        id: split
         shell: bash
         run: |
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          FILE='${{ steps.download.outputs.file }}'
+          BASE="${FILE%.*}"
+          EXT="${FILE##*.}"
 
-          ZIP_NAME="${{ steps.process.outputs.zip_file }}"
-
-          mapfile -t FILES < <(
-            find "$DOWNLOAD_DIR" -maxdepth 1 -type f \
-              $ -name "${ZIP_NAME}.manifest.json" -o -name "${ZIP_NAME}" -o -name "${ZIP_NAME%.*}.z[0-9][0-9]" -o -name "${ZIP_NAME}.z[0-9][0-9]" $ \
-              | sort
-          )
-
-          if [ "${#FILES[@]}" -eq 0 ]; then
-            echo "No split ZIP files found."
-            exit 1
+          if [ "$BASE" = "$EXT" ]; then
+            BASE="$FILE"
           fi
 
-          BATCH=0
+          WORK_PARTS="work/parts"
+          mkdir -p "$WORK_PARTS"
 
-          for FILE in "${FILES[@]}"; do
-            SIZE="$(stat -c%s "$FILE")"
+          split -b "$SPLIT_SIZE" -d --additional-suffix=.part "work/$FILE" "$WORK_PARTS/${FILE}."
 
-            if [ "$SIZE" -gt "$MAX_DIRECT_BYTES" ]; then
-              echo "ERROR: File exceeds 100MB: $FILE"
+          PART_COUNT="$(find "$WORK_PARTS" -type f -name '*.part' | wc -l | tr -d ' ')"
+
+          echo "part_count=$PART_COUNT" >> "$GITHUB_OUTPUT"
+          echo "base_file=$FILE" >> "$GITHUB_OUTPUT"
+
+          echo "Created $PART_COUNT parts"
+
+      - name: 11) Commit large parts separately
+        if: ${{ steps.download.outputs.size > 100000000 && github.event.inputs.enable_split == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE='${{ steps.split.outputs.base_file }}'
+          PART_DIR="work/parts"
+          DEST_DIR="$TEMP_DIR/${FILE}.parts"
+
+          rm -rf "$DEST_DIR"
+          mkdir -p "$DEST_DIR"
+
+          INDEX=0
+
+          for PART in "$PART_DIR"/*.part; do
+            PART_NAME="$(basename "$PART")"
+            PART_SIZE="$(stat -c%s "$PART")"
+
+            if [ "$PART_SIZE" -gt "$MAX_GIT_FILE_SIZE" ]; then
+              echo "::error::Part $PART_NAME is larger than 100MB"
               exit 1
             fi
 
-            BATCH=$((BATCH + 1))
+            mv "$PART" "$DEST_DIR/$PART_NAME"
 
-            git add "$FILE"
+            git add "$DEST_DIR/$PART_NAME"
 
             if git diff --cached --quiet; then
-              echo "No staged change for $FILE"
-              continue
+              echo "Nothing to commit for $PART_NAME"
+            else
+              git commit -m "Download part: $PART_NAME"
+
+              for i in 1 2 3; do
+                if git push; then
+                  break
+                fi
+
+                echo "Push failed for part $PART_NAME. Retry $i/3"
+                git pull --rebase origin main || true
+                sleep 5
+
+                if [ "$i" = "3" ]; then
+                  echo "::error::Push failed after 3 retries for $PART_NAME"
+                  exit 1
+                fi
+              done
             fi
 
-            git commit -m "Download split ZIP part $BATCH: $ZIP_NAME"
-
-            for i in 1 2 3; do
-              if git push; then
-                break
-              fi
-
-              git pull --rebase origin "${GITHUB_REF_NAME}"
-              sleep $((i * 3))
-
-              if [ "$i" = "3" ]; then
-                echo "Push failed after 3 retries."
-                exit 1
-              fi
-            done
+            INDEX=$((INDEX + 1))
           done
 
-      - name: Print final raw URL
+      - name: 12) Build final ZIP for large file
+        if: ${{ steps.download.outputs.size > 100000000 && github.event.inputs.enable_split == 'true' }}
+        id: zip
         shell: bash
         run: |
           set -euo pipefail
 
-          REPO="${GITHUB_REPOSITORY}"
-          BRANCH="${GITHUB_REF_NAME}"
+          FILE='${{ steps.split.outputs.base_file }}'
+          ARCHIVE="${FILE}.zip"
 
-          echo ""
-          echo "Download folder:"
-          echo "https://github.com/${REPO}/tree/${BRANCH}/download-temp"
-          echo ""
+          cd "$TEMP_DIR/${FILE}.parts"
+          zip -0 "../../$ARCHIVE" ./*.part
+          cd ../..
 
-          if [ "${{ steps.process.outputs.mode }}" = "direct" ]; then
-            echo "Final direct file:"
-            echo "https://raw.githubusercontent.com/${REPO}/${BRANCH}/download-temp/${{ steps.process.outputs.final_file }}"
+          ZIP_SIZE="$(stat -c%s "$TEMP_DIR/$ARCHIVE")"
+
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "zip_size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
+
+          echo "ZIP created: $ARCHIVE"
+          echo "ZIP size: $ZIP_SIZE"
+
+      - name: 13) Publish large ZIP to GitHub Release
+        if: ${{ steps.download.outputs.size > 100000000 && github.event.inputs.enable_split == 'true' }}
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          files: download-temp/${{ steps.zip.outputs.archive }}
+          fail_on_unmatched_files: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 14) Cleanup large temporary parts and store manifest
+        if: ${{ steps.download.outputs.size > 100000000 && github.event.inputs.enable_split == 'true' }}
+        id: large_manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE='${{ steps.split.outputs.base_file }}'
+          ARCHIVE='${{ steps.zip.outputs.archive }}'
+          ZIP_SIZE='${{ steps.zip.outputs.zip_size }}'
+
+          rm -rf "$TEMP_DIR/${FILE}.parts"
+          rm -f "$TEMP_DIR/$ARCHIVE"
+
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/$ARCHIVE"
+
+          MANIFEST="$TEMP_DIR/$ARCHIVE.json"
+
+          cat > "$MANIFEST" <<EOF
+          {
+            "type": "release",
+            "file": "$ARCHIVE",
+            "original_file": "$FILE",
+            "original_size": "${{ steps.download.outputs.size }}",
+            "zip_size": "$ZIP_SIZE",
+            "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "download_url": "$RELEASE_URL",
+            "note": "Large files cannot be stored in Git because GitHub blocks files over 100MB. Final ZIP is stored in GitHub Releases."
+          }
+          EOF
+
+          echo "final_file=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "final_type=release" >> "$GITHUB_OUTPUT"
+          echo "final_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: 15) Commit manifest and cleanup
+        if: ${{ steps.download.outputs.size > 100000000 && github.event.inputs.enable_split == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add "$TEMP_DIR/"
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "Download manifest: ${{ steps.large_manifest.outputs.final_file }}"
+
+          for i in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+
+            echo "Push failed. Retry $i/3"
+            git pull --rebase origin main || true
+            sleep 5
+          done
+
+          echo "::error::Push failed after 3 retries"
+          exit 1
+
+      - name: 16) Fail if split disabled for large file
+        if: ${{ steps.download.outputs.size > 100000000 && github.event.inputs.enable_split != 'true' }}
+        run: |
+          echo "::error::File is larger than 100MB and split is disabled."
+          exit 1
+
+      - name: 17) Final result
+        shell: bash
+        run: |
+          if [ '${{ steps.download.outputs.size }}' -le 100000000 ]; then
+            echo "FINAL_URL=${{ steps.small.outputs.final_url }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Download completed" >> "$GITHUB_STEP_SUMMARY"
+            echo "${{ steps.small.outputs.final_url }}" >> "$GITHUB_STEP_SUMMARY"
           else
-            ZIP_NAME="${{ steps.process.outputs.zip_file }}"
-
-            echo "Split ZIP created."
-            echo ""
-            echo "Main ZIP file:"
-            echo "https://raw.githubusercontent.com/${REPO}/${BRANCH}/download-temp/${ZIP_NAME}"
-            echo ""
-            echo "Manifest:"
-            echo "https://raw.githubusercontent.com/${REPO}/${BRANCH}/download-temp/${ZIP_NAME}.manifest.json"
-            echo ""
-            echo "All required parts:"
-            find "$DOWNLOAD_DIR" -maxdepth 1 -type f \
-              $ -name "${ZIP_NAME}" -o -name "${ZIP_NAME%.*}.z[0-9][0-9]" -o -name "${ZIP_NAME}.z[0-9][0-9]" $ \
-              | sort \
-              | while read -r f; do
-                  b="$(basename "$f")"
-                  echo "https://raw.githubusercontent.com/${REPO}/${BRANCH}/download-temp/${b}"
-                done
-
-            echo ""
-            echo "Usage:"
-            echo "Download all .z01/.z02/... files and the .zip file into one folder, then open the .zip file with WinRAR or 7-Zip."
+            echo "FINAL_URL=${{ steps.large_manifest.outputs.final_url }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Download completed" >> "$GITHUB_STEP_SUMMARY"
+            echo "${{ steps.large_manifest.outputs.final_url }}" >> "$GITHUB_STEP_SUMMARY"
           fi
