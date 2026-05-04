@@ -1,0 +1,224 @@
+name: File Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'Direct download URL'
+        required: true
+        type: string
+      file_name:
+        description: 'Output filename (optional)'
+        required: false
+        type: string
+        default: ''
+      split_enabled:
+        description: 'Split files larger than 90MB'
+        required: false
+        type: string
+        default: 'true'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ───────── Step 1: Setup ─────────
+      - name: 🔧 Setup environment
+        run: |
+          echo "========================================="
+          echo "  GitHub File Downloader"
+          echo "========================================="
+          echo ""
+          echo "📥 URL: ${{ github.event.inputs.file_url }}"
+          echo "📄 Filename: ${{ github.event.inputs.file_name || 'auto-detect' }}"
+          echo "✂️ Split: ${{ github.event.inputs.split_enabled }}"
+          echo ""
+          
+          # Install aria2
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2 zip
+
+          # Create working directory
+          mkdir -p ./download_temp
+          mkdir -p ./output
+
+      # ───────── Step 2: Download ─────────
+      - name: 📥 Download file
+        run: |
+          FILE_URL="${{ github.event.inputs.file_url }}"
+          FILE_NAME="${{ github.event.inputs.file_name }}"
+          
+          echo "🚀 Starting download..."
+          echo ""
+          
+          # Build aria2 command
+          ARIA2_ARGS=(
+            --max-connection-per-server=16
+            --split=16
+            --min-split-size=1M
+            --max-tries=5
+            --retry-wait=3
+            --timeout=120
+            --connect-timeout=30
+            --allow-overwrite=true
+            --auto-file-renaming=false
+            --console-log-level=notice
+            --summary-interval=5
+            --dir=./download_temp
+          )
+          
+          # Add filename if specified
+          if [ -n "$FILE_NAME" ] && [ "$FILE_NAME" != "" ]; then
+            ARIA2_ARGS+=(--out="$FILE_NAME")
+          fi
+          
+          # Download
+          aria2c "${ARIA2_ARGS[@]}" "$FILE_URL"
+          
+          echo ""
+          echo "✅ Download completed!"
+          echo ""
+          
+          # Show downloaded file info
+          echo "📁 Downloaded files:"
+          ls -lh ./download_temp/
+          
+          # Get the downloaded filename
+          DOWNLOADED_FILE=$(ls -1 ./download_temp/ | head -1)
+          echo "DOWNLOADED_FILE=$DOWNLOADED_FILE" >> $GITHUB_ENV
+          
+          FILE_SIZE=$(stat -c%s "./download_temp/$DOWNLOADED_FILE")
+          FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+          echo "FILE_SIZE=$FILE_SIZE" >> $GITHUB_ENV
+          echo "FILE_SIZE_MB=$FILE_SIZE_MB" >> $GITHUB_ENV
+          
+          echo ""
+          echo "📊 File: $DOWNLOADED_FILE"
+          echo "📊 Size: ${FILE_SIZE_MB} MB"
+
+      # ───────── Step 3: Process ─────────
+      - name: ✂️ Process and package
+        run: |
+          DOWNLOADED_FILE="${{ env.DOWNLOADED_FILE }}"
+          FILE_SIZE="${{ env.FILE_SIZE }}"
+          FILE_SIZE_MB="${{ env.FILE_SIZE_MB }}"
+          SPLIT_ENABLED="${{ github.event.inputs.split_enabled }}"
+          
+          SPLIT_SIZE=90  # MB
+          SPLIT_BYTES=$((SPLIT_SIZE * 1024 * 1024))
+          
+          echo "📦 Processing file..."
+          echo ""
+          
+          # Check if file needs splitting
+          if [ "$SPLIT_ENABLED" = "true" ] && [ "$FILE_SIZE" -gt "$SPLIT_BYTES" ]; then
+            echo "✂️ File is ${FILE_SIZE_MB}MB, splitting into ${SPLIT_SIZE}MB chunks..."
+            echo ""
+            
+            # Create split directory
+            mkdir -p ./output/parts
+            
+            # Split the file
+            split -b ${SPLIT_SIZE}m -d --additional-suffix=.part \
+              "./download_temp/$DOWNLOADED_FILE" \
+              "./output/parts/${DOWNLOADED_FILE}."
+            
+            echo "📁 Split parts:"
+            ls -lh ./output/parts/
+            
+            # Count parts
+            PART_COUNT=$(ls -1 ./output/parts/ | wc -l)
+            echo ""
+            echo "📊 Total parts: $PART_COUNT"
+            
+            # Create a manifest file
+            cat > ./output/parts/MANIFEST.txt << EOF
+          ========================================
+          GitHub File Downloader - Manifest
+          ========================================
+          Original file: $DOWNLOADED_FILE
+          Original size: ${FILE_SIZE_MB} MB
+          Parts: $PART_COUNT
+          Split size: ${SPLIT_SIZE} MB
+          Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          
+          To reassemble on Linux/Mac:
+            cat ${DOWNLOADED_FILE}.*.part > ${DOWNLOADED_FILE}
+          
+          To reassemble on Windows (CMD):
+            copy /b ${DOWNLOADED_FILE}.*.part ${DOWNLOADED_FILE}
+          
+          To reassemble on Windows (PowerShell):
+            Get-Content ${DOWNLOADED_FILE}.*.part -Raw | Set-Content ${DOWNLOADED_FILE} -NoNewline
+          ========================================
+          EOF
+            
+            echo "ARTIFACT_PATH=./output/parts" >> $GITHUB_ENV
+            echo "ARTIFACT_NAME=download-${DOWNLOADED_FILE}-parts" >> $GITHUB_ENV
+            echo "IS_SPLIT=true" >> $GITHUB_ENV
+            
+          else
+            echo "📦 File is ${FILE_SIZE_MB}MB, no splitting needed."
+            
+            # Move file to output
+            cp "./download_temp/$DOWNLOADED_FILE" "./output/$DOWNLOADED_FILE"
+            
+            echo "ARTIFACT_PATH=./output" >> $GITHUB_ENV
+            echo "ARTIFACT_NAME=download-${DOWNLOADED_FILE}" >> $GITHUB_ENV
+            echo "IS_SPLIT=false" >> $GITHUB_ENV
+          fi
+          
+          echo ""
+          echo "✅ Processing completed!"
+
+      # ───────── Step 4: Verify ─────────
+      - name: 🔍 Verify output
+        run: |
+          echo "📁 Output directory:"
+          echo ""
+          
+          if [ "${{ env.IS_SPLIT }}" = "true" ]; then
+            ls -lh ./output/parts/
+            echo ""
+            TOTAL_SIZE=$(du -sh ./output/parts/ | cut -f1)
+            echo "📊 Total output size: $TOTAL_SIZE"
+          else
+            ls -lh ./output/
+            echo ""
+            TOTAL_SIZE=$(du -sh ./output/ | cut -f1)
+            echo "📊 Total output size: $TOTAL_SIZE"
+          fi
+
+      # ───────── Step 5: Upload Artifact ─────────
+      - name: 📤 Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+          retention-days: 7
+          compression-level: 1
+          if-no-files-found: error
+
+      # ───────── Step 6: Summary ─────────
+      - name: 📋 Job summary
+        run: |
+          echo "## 📥 Download Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **File** | \`${{ env.DOWNLOADED_FILE }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Size** | ${{ env.FILE_SIZE_MB }} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Split** | ${{ env.IS_SPLIT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Artifact** | \`${{ env.ARTIFACT_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Retention** | 7 days |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Artifact uploaded successfully. Download it from the Artifacts section above." >> $GITHUB_STEP_SUMMARY
+
+      # ───────── Cleanup ─────────
+      - name: 🧹 Cleanup
+        if: always()
+        run: |
+          rm -rf ./download_temp
+          echo "🧹 Temporary files cleaned up."
