@@ -1,0 +1,81 @@
+name: Cleanup Old Downloads
+
+on:
+  schedule:
+    # هر ۱۲ ساعت اجرا می‌شود
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Remove old download-temp files
+        run: |
+          if [ -d "download-temp" ]; then
+            echo "🧹 پاکسازی پوشه download-temp..."
+            
+            # Find files older than 2 days
+            find download-temp -type f -mtime +2 -delete 2>/dev/null || true
+            
+            # Remove empty directories
+            find download-temp -type d -empty -delete 2>/dev/null || true
+            
+            # If directory is now empty, remove it
+            if [ -z "$(ls -A download-temp 2>/dev/null)" ]; then
+              rm -rf download-temp
+              echo "📁 پوشه download-temp حذف شد."
+            fi
+            
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git diff --staged --quiet || {
+              git commit -m "🧹 Auto-cleanup: removed old downloads [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+              git push
+            }
+            echo "✅ پاکسازی انجام شد."
+          else
+            echo "📁 پوشه download-temp وجود ندارد."
+          fi
+
+      - name: Delete old artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            
+            const artifacts = await github.rest.actions.listArtifactsForRepo({
+              owner,
+              repo,
+              per_page: 100
+            });
+            
+            const twoDaysAgo = new Date();
+            twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+            
+            let deleted = 0;
+            for (const artifact of artifacts.data.artifacts) {
+              const createdAt = new Date(artifact.created_at);
+              if (createdAt < twoDaysAgo) {
+                try {
+                  await github.rest.actions.deleteArtifact({
+                    owner,
+                    repo,
+                    artifact_id: artifact.id
+                  });
+                  deleted++;
+                  console.log(`🗑️ Deleted: ${artifact.name} (created: ${artifact.created_at})`);
+                } catch (e) {
+                  console.log(`⚠️ Failed to delete ${artifact.name}: ${e.message}`);
+                }
+              }
+            }
+            
+            console.log(`\n✅ Total deleted: ${deleted} artifacts`);
