@@ -1,0 +1,9 @@
+{
+  "name": "lX1D0S5v7kE4uWCe9atASYxor82He8Q-20260504-172350.mp4",
+  "type": "split",
+  "partSize": "90M",
+  "partCount": 3,
+  "originalSize": 240525549,
+  "createdAt": "2026-05-04T17:23:55Z",
+  "rebuild": "cat lX1D0S5v7kE4uWCe9atASYxor82He8Q-20260504-172350.mp4.part-*.part > lX1D0S5v7kE4uWCe9atASYxor82He8Q-20260504-172350.mp4"
+}
